@@ -15,6 +15,7 @@ import ru.gravit.launchserver.auth.handler.AuthHandler;
 import ru.gravit.launchserver.auth.handler.MemoryAuthHandler;
 import ru.gravit.launchserver.auth.hwid.AcceptHWIDHandler;
 import ru.gravit.launchserver.auth.hwid.HWIDHandler;
+import ru.gravit.launchserver.auth.permissions.DefaultPermissionsHandler;
 import ru.gravit.launchserver.auth.permissions.JsonFilePermissionsHandler;
 import ru.gravit.launchserver.auth.permissions.PermissionsHandler;
 import ru.gravit.launchserver.auth.protect.NoProtectHandler;
@@ -24,6 +25,7 @@ import ru.gravit.launchserver.auth.provider.RejectAuthProvider;
 import ru.gravit.launchserver.binary.*;
 import ru.gravit.launchserver.components.AuthLimiterComponent;
 import ru.gravit.launchserver.components.Component;
+import ru.gravit.launchserver.config.LaunchServerRuntimeConfig;
 import ru.gravit.launchserver.config.adapter.*;
 import ru.gravit.launchserver.manangers.*;
 import ru.gravit.launchserver.manangers.hook.AuthHookManager;
@@ -40,11 +42,9 @@ import ru.gravit.utils.command.StdCommandHandler;
 import ru.gravit.utils.config.JsonConfigurable;
 import ru.gravit.utils.helper.*;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.lang.ProcessBuilder.Redirect;
+import java.lang.reflect.InvocationTargetException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.file.*;
@@ -76,11 +76,11 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     }
 
     public static final class Config {
-        public int port;
+        public int legacyPort;
 
-        private String address;
+        private String legacyAddress;
 
-        private String bindAddress;
+        private String legacyBindAddress;
 
         public String projectName;
 
@@ -131,30 +131,26 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         public NettyConfig netty;
         public GuardLicenseConf guardLicense;
 
-        public boolean compress;
-
         public String whitelistRejectString;
 
         public boolean genMappings;
-        public boolean isUsingWrapper;
-        public boolean isDownloadJava;
+        public LauncherConf launcher;
 
         public boolean isWarningMissArchJava;
         public boolean enabledProGuard;
         public boolean enabledRadon;
         public boolean stripLineNumbers;
         public boolean deleteTempFiles;
-        public boolean enableRcon;
 
         public String startScript;
 
-        public String getAddress() {
-            return address;
+        public String getLegacyAddress() {
+            return legacyAddress;
         }
 
 
-        public String getBindAddress() {
-            return bindAddress;
+        public String getLegacyBindAddress() {
+            return legacyBindAddress;
         }
 
         public void setProjectName(String projectName) {
@@ -171,17 +167,17 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
 
 
         public SocketAddress getSocketAddress() {
-            return new InetSocketAddress(bindAddress, port);
+            return new InetSocketAddress(legacyBindAddress, legacyPort);
         }
 
 
-        public void setAddress(String address) {
-            this.address = address;
+        public void setLegacyAddress(String legacyAddress) {
+            this.legacyAddress = legacyAddress;
         }
 
 
         public void verify() {
-            VerifyHelper.verify(getAddress(), VerifyHelper.NOT_EMPTY, "LaunchServer address can't be empty");
+            VerifyHelper.verify(getLegacyAddress(), VerifyHelper.NOT_EMPTY, "LaunchServer address can't be empty");
             if (auth == null || auth[0] == null) {
                 throw new NullPointerException("AuthHandler must not be null");
             }
@@ -242,14 +238,34 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         public String txtProductVersion;
     }
 
+    public class LauncherConf
+    {
+        public String guardType;
+    }
+
     public class NettyConfig {
-        public String bindAddress;
-        public int port;
         public boolean clientEnabled;
         public String launcherURL;
         public String downloadURL;
         public String launcherEXEURL;
         public String address;
+        public NettyPerformanceConfig performance;
+        public NettyBindAddress[] binds;
+    }
+    public class NettyPerformanceConfig
+    {
+        public int bossThread;
+        public int workerThread;
+    }
+    public class NettyBindAddress
+    {
+        public String address;
+        public int port;
+
+        public NettyBindAddress(String address, int port) {
+            this.address = address;
+            this.port = port;
+        }
     }
 
     public class GuardLicenseConf {
@@ -293,7 +309,7 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         long startTime = System.currentTimeMillis();
         try {
             @SuppressWarnings("resource")
-            LaunchServer launchserver = new LaunchServer(IOHelper.WORKING_DIR, args);
+            LaunchServer launchserver = new LaunchServer(IOHelper.WORKING_DIR, false, args);
             if (args.length == 0) launchserver.run();
             else { //Обработка команды
                 launchserver.commandHandler.eval(args, false);
@@ -310,6 +326,8 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
 
     public final Path dir;
 
+	public final boolean testEnv;
+
     public final Path launcherLibraries;
 
     public final Path launcherLibrariesCompile;
@@ -317,6 +335,7 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     public final List<String> args;
 
     public final Path configFile;
+    public final Path runtimeConfigFile;
 
     public final Path publicKeyFile;
 
@@ -330,6 +349,7 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     // Server config
 
     public Config config;
+    public LaunchServerRuntimeConfig runtime;
 
 
     public final RSAPublicKey publicKey;
@@ -338,6 +358,8 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     // Launcher binary
 
     public final JARLauncherBinary launcherBinary;
+
+    public Class<? extends LauncherBinary> launcherEXEBinaryClass;
 
     public final LauncherBinary launcherEXEBinary;
     // HWID ban + anti-brutforce
@@ -382,13 +404,17 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     public static Gson gson;
     public static GsonBuilder gsonBuilder;
 
-    public LaunchServer(Path dir, String[] args) throws IOException, InvalidKeySpecException {
+    public static Class<? extends LauncherBinary> defaultLauncherEXEBinaryClass = null;
+
+    public LaunchServer(Path dir, boolean testEnv, String[] args) throws IOException, InvalidKeySpecException {
         this.dir = dir;
+        this.testEnv = testEnv;
         taskPool = new Timer("Timered task worker thread", true);
         launcherLibraries = dir.resolve("launcher-libraries");
         launcherLibrariesCompile = dir.resolve("launcher-libraries-compile");
         this.args = Arrays.asList(args);
         configFile = dir.resolve("LaunchServer.conf");
+        runtimeConfigFile = dir.resolve("RuntimeLaunchServer.conf");
         publicKeyFile = dir.resolve("public.key");
         privateKeyFile = dir.resolve("private.key");
         updatesDir = dir.resolve("updates");
@@ -407,16 +433,19 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
 
         // Set command handler
         CommandHandler localCommandHandler;
-        try {
-            Class.forName("jline.Terminal");
+        if (testEnv)
+            localCommandHandler = new StdCommandHandler(false);
+        else
+        	try {
+        		Class.forName("jline.Terminal");
 
-            // JLine2 available
-            localCommandHandler = new JLineCommandHandler();
-            LogHelper.info("JLine2 terminal enabled");
-        } catch (ClassNotFoundException ignored) {
-            localCommandHandler = new StdCommandHandler(true);
-            LogHelper.warning("JLine2 isn't in classpath, using std");
-        }
+        		// JLine2 available
+        		localCommandHandler = new JLineCommandHandler();
+        		LogHelper.info("JLine2 terminal enabled");
+        	} catch (ClassNotFoundException ignored) {
+        		localCommandHandler = new StdCommandHandler(true);
+        		LogHelper.warning("JLine2 isn't in classpath, using std");
+        	}
         ru.gravit.launchserver.command.handler.CommandHandler.registerCommands(localCommandHandler);
         commandHandler = localCommandHandler;
 
@@ -444,6 +473,9 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         crc.update(publicKey.getModulus().toByteArray()); // IDEA говорит, что это Java 9 API. WTF?
         LogHelper.subInfo("Modulus CRC32: 0x%08x", crc.getValue());
 
+        // Load class bindings.
+        launcherEXEBinaryClass = defaultLauncherEXEBinaryClass;
+
         // pre init modules
         modulesManager = new ModulesManager(this);
         modulesManager.autoload(dir.resolve("modules"));
@@ -451,11 +483,25 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         initGson();
 
         // Read LaunchServer config
-        generateConfigIfNotExists();
+        generateConfigIfNotExists(testEnv);
         LogHelper.info("Reading LaunchServer config file");
         try (BufferedReader reader = IOHelper.newReader(configFile)) {
             config = Launcher.gson.fromJson(reader, Config.class);
         }
+        if(!Files.exists(runtimeConfigFile))
+        {
+            LogHelper.info("Reset LaunchServer runtime config file");
+            runtime = new LaunchServerRuntimeConfig();
+            runtime.reset();
+        }
+        else
+        {
+            LogHelper.info("Reading LaunchServer runtime config file");
+            try (BufferedReader reader = IOHelper.newReader(runtimeConfigFile)) {
+                runtime = Launcher.gson.fromJson(reader, LaunchServerRuntimeConfig.class);
+            }
+        }
+        runtime.verify();
         config.verify();
         Launcher.applyLauncherEnv(config.env);
         for (AuthProviderPair provider : config.auth) {
@@ -574,6 +620,14 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
     }
 
     private LauncherBinary binary() {
+    	if (launcherEXEBinaryClass != null) {
+    		try {
+				return (LauncherBinary)launcherEXEBinaryClass.getConstructor(LaunchServer.class).newInstance(this);
+			} catch (InstantiationException | IllegalAccessException | IllegalArgumentException
+					| InvocationTargetException | NoSuchMethodException | SecurityException e) {
+				LogHelper.error(e);
+			}
+    	}
         try {
             Class.forName("net.sf.launch4j.Builder");
             if (config.launch4j.enabled) return new EXEL4JLauncherBinary(this);
@@ -595,11 +649,23 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         // Close handlers & providers
         config.close();
         modulesManager.close();
+        LogHelper.info("Save LaunchServer runtime config");
+        try(Writer writer = IOHelper.newWriter(runtimeConfigFile))
+        {
+            if(LaunchServer.gson != null)
+            {
+                LaunchServer.gson.toJson(runtime, writer);
+            } else {
+                LogHelper.error("Error writing LaunchServer runtime config file. Gson is null");
+            }
+        } catch (IOException e) {
+            LogHelper.error(e);
+        }
         // Print last message before death :(
         LogHelper.info("LaunchServer stopped");
     }
 
-    private void generateConfigIfNotExists() throws IOException {
+    private void generateConfigIfNotExists(boolean testEnv) throws IOException {
         if (IOHelper.isFile(configFile))
             return;
 
@@ -625,16 +691,23 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
                 new RequestTextureProvider("http://example.com/skins/%username%.png", "http://example.com/cloaks/%username%.png")
                 , "std")};
         newConfig.protectHandler = new NoProtectHandler();
-        newConfig.permissionsHandler = new JsonFilePermissionsHandler();
-        newConfig.port = 7240;
-        newConfig.bindAddress = "0.0.0.0";
+        if (testEnv) newConfig.permissionsHandler = new DefaultPermissionsHandler();
+        else newConfig.permissionsHandler = new JsonFilePermissionsHandler();
+        newConfig.legacyPort = 7240;
+        newConfig.legacyBindAddress = "0.0.0.0";
         newConfig.binaryName = "Launcher";
         newConfig.whitelistRejectString = "Вас нет в белом списке";
 
         newConfig.netty = new NettyConfig();
         newConfig.netty.address = "ws://localhost:9274/api";
+        newConfig.netty.downloadURL = "http://localhost:9274/%dirname%/";
+        newConfig.netty.launcherURL = "http://localhost:9274/Launcher.jar";
+        newConfig.netty.launcherEXEURL = "http://localhost:9274/Launcher.exe";
         newConfig.netty.clientEnabled = false;
-        newConfig.netty.port = 9274;
+        newConfig.netty.binds = new NettyBindAddress[]{ new NettyBindAddress("0.0.0.0", 9274) };
+        newConfig.netty.performance = new NettyPerformanceConfig();
+        newConfig.netty.performance.bossThread = 2;
+        newConfig.netty.performance.workerThread = 8;
 
         newConfig.threadCoreCount = 0; // on your own
         newConfig.threadCount = JVMHelper.OPERATING_SYSTEM_MXBEAN.getAvailableProcessors() >= 4 ? JVMHelper.OPERATING_SYSTEM_MXBEAN.getAvailableProcessors() / 2 : JVMHelper.OPERATING_SYSTEM_MXBEAN.getAvailableProcessors();
@@ -653,10 +726,15 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         newConfig.components.put("authLimiter", authLimiterComponent);
 
         // Set server address
-        System.out.println("LaunchServer address: ");
-        newConfig.setAddress(commandHandler.readLine());
-        System.out.println("LaunchServer projectName: ");
-        newConfig.setProjectName(commandHandler.readLine());
+        if (testEnv) {
+        	newConfig.setLegacyAddress("localhost");
+        	newConfig.setProjectName("test");
+        } else {
+        	System.out.println("LaunchServer address: ");
+        	newConfig.setLegacyAddress(commandHandler.readLine());
+        	System.out.println("LaunchServer projectName: ");
+        	newConfig.setProjectName(commandHandler.readLine());
+        }
 
         // Write LaunchServer config
         LogHelper.info("Writing LaunchServer config file");
@@ -665,10 +743,13 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
         }
     }
 
-    public Collection<ClientProfile> getProfiles() {
+    public List<ClientProfile> getProfiles() {
         return profilesList;
     }
 
+    public void setProfiles(List<ClientProfile> profilesList) {
+        this.profilesList = Collections.unmodifiableList(profilesList);
+    }
 
     public SignedObjectHolder<HashedDir> getUpdateDir(String name) {
         return updatesDirMap.get(name);
@@ -696,8 +777,10 @@ public final class LaunchServer implements Runnable, AutoCloseable, Reloadable {
             throw new IllegalStateException("LaunchServer has been already started");
 
         // Add shutdown hook, then start LaunchServer
-        JVMHelper.RUNTIME.addShutdownHook(CommonHelper.newThread(null, false, this::close));
-        CommonHelper.newThread("Command Thread", true, commandHandler).start();
+        if (!this.testEnv) {
+        	JVMHelper.RUNTIME.addShutdownHook(CommonHelper.newThread(null, false, this::close));
+        	CommonHelper.newThread("Command Thread", true, commandHandler).start();
+        }
         rebindServerSocket();
         if (config.netty != null)
             rebindNettyServerSocket();

@@ -139,8 +139,6 @@ public final class ClientLauncher {
     private static final String SOCKET_HOST = "127.0.0.1";
     private static final int SOCKET_PORT = Launcher.getConfig().clientPort;
     private static final String MAGICAL_INTEL_OPTION = "-XX:HeapDumpPath=ThisTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump";
-    private static final boolean isUsingWrapper = Launcher.getConfig().isUsingWrapper;
-    private static final boolean isDownloadJava = Launcher.getConfig().isDownloadJava;
 
     private static Path JavaBinPath;
     @SuppressWarnings("unused")
@@ -163,10 +161,6 @@ public final class ClientLauncher {
         String[] cloakURL;
         @LauncherAPI
         String[] cloakDigest;
-    }
-
-    public static boolean isDownloadJava() {
-        return isDownloadJava;
     }
 
     public static Path getJavaBinPath() {
@@ -263,11 +257,6 @@ public final class ClientLauncher {
     @LauncherAPI
     public static boolean isLaunched() {
         return Launcher.LAUNCHED.get();
-    }
-
-
-    public static boolean isUsingWrapper() {
-        return JVMHelper.OS_TYPE == OS.MUSTDIE && isUsingWrapper;
     }
 
     private static void launch(ClientProfile profile, Params params) throws Throwable {
@@ -468,27 +457,24 @@ public final class ClientLauncher {
         // Start client with WatchService monitoring
         boolean digest = !profile.isUpdateFastCheck();
         LogHelper.debug("Restore sessions");
-        if(Launcher.getConfig().isNettyEnabled)
+        RestoreSessionRequest request = new RestoreSessionRequest(Request.getSession());
+        request.request();
+        LegacyRequestBridge.service.reconnectCallback = () ->
         {
-            RestoreSessionRequest request = new RestoreSessionRequest(Request.getSession());
-            request.request();
-            LegacyRequestBridge.service.reconnectCallback = () ->
-            {
-                LogHelper.debug("WebSocket connect closed. Try reconnect");
-                try {
-                    if (!LegacyRequestBridge.service.reconnectBlocking()) LogHelper.error("Error connecting");
-                    LogHelper.debug("Connect to %s", Launcher.getConfig().address);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                try {
-                    RestoreSessionRequest request1 = new RestoreSessionRequest(Request.getSession());
-                    request1.request();
-                } catch (Exception e) {
-                    LogHelper.error(e);
-                }
-            };
-        }
+            LogHelper.debug("WebSocket connect closed. Try reconnect");
+            try {
+                if (!LegacyRequestBridge.service.reconnectBlocking()) LogHelper.error("Error connecting");
+                LogHelper.debug("Connect to %s", Launcher.getConfig().address);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            try {
+                RestoreSessionRequest request1 = new RestoreSessionRequest(Request.getSession());
+                request1.request();
+            } catch (Exception e) {
+                LogHelper.error(e);
+            }
+        };
         LogHelper.debug("Starting JVM and client WatchService");
         FileNameMatcher assetMatcher = profile.getAssetUpdateMatcher();
         FileNameMatcher clientMatcher = profile.getClientUpdateMatcher();
